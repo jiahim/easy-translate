@@ -1,0 +1,29 @@
+{
+  "name": "easy-translate",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "typecheck": "pnpm --filter @easy-translate/core build && pnpm -r --if-present typecheck",
+    "test": "pnpm --filter @easy-translate/core build && pnpm -r --if-present test",
+    "lint": "pnpm -r --if-present lint",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "pack:check": "pnpm --filter @easy-translate/core pack --dry-run && pnpm --filter @easy-translate/office pack --dry-run",
+    "changeset": "changeset",
+    "version-packages": "changeset version"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.7",
+    "@types/node": "^24.1.0",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "sharp",
+      "workerd"
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "name": "@easy-translate/office",
+  "version": "0.1.0",
+  "description": "Translate DOCX, PPTX and XLSX files while preserving OOXML formatting.",
+  "type": "module",
+  "sideEffects": false,
+  "bin": {
+    "office-translate": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js"
+    },
+    "./office-adapter": {
+      "types": "./dist/office-adapter.d.ts",
+      "import": "./dist/office-adapter.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx tests/run.ts"
+  },
+  "keywords": [
+    "office",
+    "translation",
+    "docx",
+    "pptx",
+    "xlsx",
+    "ooxml"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@easy-translate/core": "workspace:^",
+    "commander": "^14.0.0",
+    "jszip": "^3.10.1"
+  }
+}
