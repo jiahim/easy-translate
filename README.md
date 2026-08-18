@@ -19,9 +19,14 @@ Easy Translate 是一个以 `TranslationPlan` 为统一边界的 TypeScript 翻�
 
 ```sh
 pnpm install
+pnpm office-web
 pnpm check
 pnpm lint
 pnpm pack:check
 ```
+
+`pnpm office-web` 会先构建 `@easy-translate/core`，再启动 Office Web 的本地开发服务。
+
+完整的开发、版本管理、npm 发布和 Web 部署流程见 [HANDOFF.md](./HANDOFF.md)。
 
 公共包采用 ESM-only，并通过 package exports 暴露正式入口。

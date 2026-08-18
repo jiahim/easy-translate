@@ -1,9 +1,11 @@
 import JSZip from "jszip";
 import {
+  retryOperation,
   translatePlan,
   type TranslationCheckpoint as CoreTranslationCheckpoint,
   type TranslationPlan as CoreTranslationPlan,
   type TranslationProgress as CoreTranslationProgress,
+  type TranslationRetryPolicy,
 } from "@easy-translate/core";
 
 export type OfficeFormat = "word" | "powerpoint" | "excel";
@@ -90,6 +92,19 @@ export interface TranslationProvider {
   ): Promise<TranslationOutputItem[]>;
 }
 
+export function translateProviderBatchWithRetry(
+  provider: TranslationProvider,
+  request: TranslationBatchRequest,
+  signal?: AbortSignal,
+  onActivity?: (activity: TranslationActivity) => void,
+  retry: TranslationRetryPolicy = {},
+): Promise<TranslationOutputItem[]> {
+  return retryOperation(
+    () => provider.translateBatch(request, signal, onActivity),
+    { ...retry, ...(signal ? { signal } : {}) },
+  );
+}
+
 export interface OfficeScopeOptions {
   includeComments?: boolean;
   includeHeadersAndFooters?: boolean;
@@ -172,13 +187,6 @@ export class OfficeTranslationError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "OfficeTranslationError";
-  }
-}
-
-export class ProviderTimeoutError extends OfficeTranslationError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
-    this.name = "ProviderTimeoutError";
   }
 }
 
@@ -1409,7 +1417,8 @@ async function buildDocumentGlossary(
   report(0, 1, 0);
   let responding = false;
   try {
-    const output = await options.provider.translateBatch(
+    const output = await translateProviderBatchWithRetry(
+      options.provider,
       request,
       options.signal,
       () => {
@@ -1417,6 +1426,11 @@ async function buildDocumentGlossary(
           responding = true;
           report(0, 1, 1);
         }
+      },
+      {
+        baseDelayMs: 400,
+        maxDelayMs: 2_000,
+        maxRetries: options.retries ?? 2,
       },
     );
     const expected = candidates.map((item) => ({
@@ -1680,9 +1694,6 @@ async function translateSegmentsWithCore(
       baseDelayMs: 400,
       maxDelayMs: 2_000,
       maxRetries: options.retries ?? 2,
-      shouldRetry(error) {
-        return !(error instanceof ProviderTimeoutError);
-      },
     },
     ...(options.signal ? { signal: options.signal } : {}),
     ...(checkpoint ? { checkpoint } : {}),
@@ -1691,6 +1702,7 @@ async function translateSegmentsWithCore(
         return undefined;
       }
       return {
+        issueCode: "source_text_unchanged",
         message: "大模型服务未完整翻译这段内容：" + item.text.slice(0, 80),
         retryInstruction: [
           "QUALITY RETRY: Translate every natural-language phrase in every item into the target language.",

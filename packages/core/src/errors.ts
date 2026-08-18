@@ -1,31 +1,125 @@
-export class TranslationCoreError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+export const TranslationErrorCode = {
+  ConfigTargetLanguageRequired: "config.target_language_required",
+  ConfigInvalidIntegerOption: "config.invalid_integer_option",
+  PlanUnsupportedSchema: "plan.unsupported_schema",
+  PlanDocumentIdRequired: "plan.document_id_required",
+  PlanDocumentFormatRequired: "plan.document_format_required",
+  PlanUnitIdRequired: "plan.unit_id_required",
+  PlanDuplicateUnitId: "plan.duplicate_unit_id",
+  PlanDedupeTextMismatch: "plan.dedupe_text_mismatch",
+  ResponseInvalidContainer: "response.invalid_container",
+  ResponseInvalidItem: "response.invalid_item",
+  ResponseUnexpectedId: "response.unexpected_id",
+  ResponseDuplicateId: "response.duplicate_id",
+  ResponseMissingId: "response.missing_id",
+  ResponseQualityRejected: "response.quality_rejected",
+  ProviderAuthentication: "provider.authentication",
+  ProviderInvalidRequest: "provider.invalid_request",
+  ProviderNetwork: "provider.network",
+  ProviderRateLimit: "provider.rate_limit",
+  ProviderServer: "provider.server",
+  ProviderTimeout: "provider.timeout",
+  ProviderUnknown: "provider.unknown",
+} as const;
+
+type ValueOf<T> = T[keyof T];
+
+export type TranslationErrorCode = ValueOf<typeof TranslationErrorCode>;
+export type TranslationConfigurationErrorCode = Extract<
+  TranslationErrorCode,
+  `config.${string}`
+>;
+export type TranslationPlanErrorCode = Extract<
+  TranslationErrorCode,
+  `plan.${string}`
+>;
+export type TranslationResponseErrorCode = Extract<
+  TranslationErrorCode,
+  `response.${string}`
+>;
+export type TranslationProviderErrorCode = Extract<
+  TranslationErrorCode,
+  `provider.${string}`
+>;
+
+export type TranslationErrorDetails = Readonly<Record<string, unknown>>;
+
+export interface TranslationCoreErrorOptions extends ErrorOptions {
+  details?: TranslationErrorDetails;
+}
+
+export abstract class TranslationCoreError<
+  TCode extends TranslationErrorCode = TranslationErrorCode,
+> extends Error {
+  readonly code: TCode;
+  readonly details: TranslationErrorDetails;
+
+  protected constructor(
+    code: TCode,
+    message: string,
+    options: TranslationCoreErrorOptions = {},
+  ) {
     super(message, options);
     this.name = "TranslationCoreError";
+    this.code = code;
+    this.details = Object.freeze({ ...options.details });
   }
 }
 
-export class TranslationPlanError extends TranslationCoreError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
+export function isTranslationCoreError(
+  error: unknown,
+): error is TranslationCoreError<TranslationErrorCode> {
+  return error instanceof TranslationCoreError;
+}
+
+export class TranslationConfigurationError extends TranslationCoreError<
+  TranslationConfigurationErrorCode
+> {
+  constructor(
+    code: TranslationConfigurationErrorCode,
+    message: string,
+    options?: TranslationCoreErrorOptions,
+  ) {
+    super(code, message, options);
+    this.name = "TranslationConfigurationError";
+  }
+}
+
+export class TranslationPlanError extends TranslationCoreError<
+  TranslationPlanErrorCode
+> {
+  constructor(
+    code: TranslationPlanErrorCode,
+    message: string,
+    options?: TranslationCoreErrorOptions,
+  ) {
+    super(code, message, options);
     this.name = "TranslationPlanError";
   }
 }
 
-export class TranslationResponseError extends TranslationCoreError {
+export interface TranslationResponseErrorOptions
+  extends TranslationCoreErrorOptions {
+  retryInstruction?: string;
+}
+
+export class TranslationResponseError extends TranslationCoreError<
+  TranslationResponseErrorCode
+> {
   readonly reason: "quality" | "response";
   readonly retryInstruction?: string;
 
   constructor(
+    code: TranslationResponseErrorCode,
     message: string,
-    options: ErrorOptions & {
-      reason?: "quality" | "response";
-      retryInstruction?: string;
-    } = {},
+    options: TranslationResponseErrorOptions = {},
   ) {
-    super(message, options);
+    super(code, message, options);
     this.name = "TranslationResponseError";
-    this.reason = options.reason ?? "response";
+    this.reason =
+      code === TranslationErrorCode.ResponseQualityRejected
+        ? "quality"
+        : "response";
     if (options.retryInstruction !== undefined) {
       this.retryInstruction = options.retryInstruction;
     }
@@ -41,28 +135,48 @@ export type TranslationProviderErrorKind =
   | "timeout"
   | "unknown";
 
-export class TranslationProviderError extends TranslationCoreError {
-  readonly code?: string;
+const PROVIDER_KIND_BY_CODE = {
+  [TranslationErrorCode.ProviderAuthentication]: "authentication",
+  [TranslationErrorCode.ProviderInvalidRequest]: "invalid-request",
+  [TranslationErrorCode.ProviderNetwork]: "network",
+  [TranslationErrorCode.ProviderRateLimit]: "rate-limit",
+  [TranslationErrorCode.ProviderServer]: "server",
+  [TranslationErrorCode.ProviderTimeout]: "timeout",
+  [TranslationErrorCode.ProviderUnknown]: "unknown",
+} as const satisfies Record<
+  TranslationProviderErrorCode,
+  TranslationProviderErrorKind
+>;
+
+export interface TranslationProviderErrorOptions
+  extends TranslationCoreErrorOptions {
+  providerCode?: string;
+  retryAfterMs?: number;
+  retryable?: boolean;
+  status?: number;
+}
+
+export class TranslationProviderError extends TranslationCoreError<
+  TranslationProviderErrorCode
+> {
   readonly kind: TranslationProviderErrorKind;
+  readonly providerCode?: string;
   readonly retryAfterMs?: number;
   readonly retryable: boolean;
   readonly status?: number;
 
   constructor(
+    code: TranslationProviderErrorCode,
     message: string,
-    options: ErrorOptions & {
-      code?: string;
-      kind?: TranslationProviderErrorKind;
-      retryAfterMs?: number;
-      retryable?: boolean;
-      status?: number;
-    } = {},
+    options: TranslationProviderErrorOptions = {},
   ) {
-    super(message, options);
+    super(code, message, options);
     this.name = "TranslationProviderError";
-    this.kind = options.kind ?? "unknown";
+    this.kind = PROVIDER_KIND_BY_CODE[code];
     this.retryable = options.retryable ?? false;
-    if (options.code !== undefined) this.code = options.code;
+    if (options.providerCode !== undefined) {
+      this.providerCode = options.providerCode;
+    }
     if (options.retryAfterMs !== undefined) {
       this.retryAfterMs = options.retryAfterMs;
     }

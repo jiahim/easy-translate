@@ -8,8 +8,10 @@ import type {
 import { resolveHeaders } from "./environment.js";
 import {
   providerHttpError,
+  providerEndpoint,
   providerRequestError,
   providerRequestSignal,
+  providerResponseText,
 } from "./http.js";
 
 function readPath(value: unknown, path: string): unknown {
@@ -99,33 +101,39 @@ export class GenericHttpProvider implements TranslationProvider {
       body.instructions = request.instructions;
     }
 
+    const endpoint = providerEndpoint(this.config.url, "url");
+    const requestSignal = providerRequestSignal(
+      signal,
+      this.config.timeoutMs ?? 60_000,
+    );
     let response: Response;
     try {
-      response = await fetch(this.config.url, {
+      response = await fetch(endpoint, {
         method: this.config.method ?? "POST",
         headers,
         body: JSON.stringify(body),
-        signal: providerRequestSignal(
-          signal,
-          this.config.timeoutMs ?? 60_000,
-        ),
+        signal: requestSignal,
       });
     } catch (error) {
       throw providerRequestError(
         "Generic HTTP provider request failed.",
         error,
         signal,
+        requestSignal,
       );
     }
 
-    const raw = await response.text();
+    const raw = await providerResponseText(
+      response,
+      "Unable to read the generic HTTP provider response.",
+      signal,
+      requestSignal,
+    );
     if (!response.ok) {
       throw providerHttpError(
         response,
-        "Generic HTTP provider returned " +
-          response.status +
-          ": " +
-          raw.slice(0, 500),
+        "Generic HTTP provider returned HTTP " + response.status + ".",
+        raw,
       );
     }
 

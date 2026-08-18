@@ -1,6 +1,12 @@
 import {
+  isTranslationCoreError,
+  TranslationErrorCode,
+  TranslationProviderError,
+  TranslationResponseError,
+  type TranslationProviderErrorCode,
+} from "@easy-translate/core";
+import {
   OfficeTranslationError,
-  ProviderTimeoutError,
   translationSystemPrompt,
   type TranslationBatchRequest,
   type TranslationActivity,
@@ -26,122 +32,220 @@ export interface GenericProviderSettings {
   requestTimeoutMs?: number;
 }
 
-const MAX_TRANSIENT_RETRIES = 3;
+interface ProviderFailureMetadata {
+  providerCode?: string;
+  requestId?: string;
+  retryAfterMs?: number;
+  status?: number;
+}
 
-function retryAfterMilliseconds(response: Response): number {
+function retryAfterMilliseconds(response: Response): number | undefined {
   const value = response.headers.get("retry-after")?.trim();
   if (value) {
     const seconds = Number(value);
     if (Number.isFinite(seconds) && seconds >= 0) {
-      return Math.min(60_000, Math.round(seconds * 1_000));
+      return Math.ceil(seconds * 1_000);
     }
     const date = Date.parse(value);
     if (Number.isFinite(date)) {
-      return Math.min(60_000, Math.max(0, date - Date.now()));
+      return Math.max(0, date - Date.now());
     }
   }
-  return response.status === 429 ? 10_000 : 5_000;
+  return undefined;
 }
 
-async function responseErrorCode(response: Response): Promise<string> {
+function browserEndpoint(value: string): string {
+  const baseUrl =
+    typeof document === "undefined"
+      ? "https://easy-translate.invalid/"
+      : document.baseURI;
   try {
-    const payload = (await response.clone().json()) as Record<string, unknown>;
-    return typeof payload.code === "string" ? payload.code : "";
+    if (!value.trim()) throw new TypeError("Provider URL is empty.");
+    const endpoint = new URL(value, baseUrl);
+    if (endpoint.protocol !== "http:" && endpoint.protocol !== "https:") {
+      throw new TypeError("Unsupported provider URL protocol.");
+    }
+    return /^[a-z][a-z\d+.-]*:/iu.test(value) ? endpoint.href : value;
+  } catch (cause) {
+    throw new TranslationProviderError(
+      TranslationErrorCode.ProviderInvalidRequest,
+      "Provider endpoint is not a valid HTTP URL.",
+      { cause, retryable: false },
+    );
+  }
+}
+
+function normalizedProviderCode(
+  metadata: ProviderFailureMetadata,
+): TranslationProviderErrorCode {
+  const status = metadata.status;
+  if (status === 401 || status === 403) {
+    return TranslationErrorCode.ProviderAuthentication;
+  }
+  if (status === 408 || status === 504) {
+    return TranslationErrorCode.ProviderTimeout;
+  }
+  if (status === 429) return TranslationErrorCode.ProviderRateLimit;
+  if (status !== undefined && status >= 500) {
+    return TranslationErrorCode.ProviderServer;
+  }
+  if (status !== undefined && status >= 400) {
+    return TranslationErrorCode.ProviderInvalidRequest;
+  }
+  if (status !== undefined) return TranslationErrorCode.ProviderUnknown;
+  if (metadata.providerCode === "upstream_timeout") {
+    return TranslationErrorCode.ProviderTimeout;
+  }
+  if (metadata.providerCode === "upstream_network_error") {
+    return TranslationErrorCode.ProviderNetwork;
+  }
+  return TranslationErrorCode.ProviderUnknown;
+}
+
+function normalizedProviderError(
+  metadata: ProviderFailureMetadata,
+  cause?: unknown,
+): TranslationProviderError {
+  const code = normalizedProviderCode(metadata);
+  const neverRetry =
+    metadata.providerCode === "daily_quota_exceeded" ||
+    metadata.providerCode === "model_not_configured";
+  const retryable =
+    !neverRetry &&
+    (code === TranslationErrorCode.ProviderNetwork ||
+      code === TranslationErrorCode.ProviderRateLimit ||
+      code === TranslationErrorCode.ProviderServer ||
+      code === TranslationErrorCode.ProviderTimeout);
+  return new TranslationProviderError(
+    code,
+    metadata.status === undefined
+      ? "Provider request failed."
+      : `Provider request failed with HTTP ${metadata.status}.`,
+    {
+      ...(cause === undefined ? {} : { cause }),
+      retryable,
+      ...(metadata.status === undefined ? {} : { status: metadata.status }),
+      ...(metadata.providerCode === undefined
+        ? {}
+        : { providerCode: metadata.providerCode }),
+      ...(metadata.retryAfterMs === undefined
+        ? {}
+        : { retryAfterMs: metadata.retryAfterMs }),
+      ...(metadata.requestId === undefined
+        ? {}
+        : { details: { requestId: metadata.requestId } }),
+    },
+  );
+}
+
+function responseFailureMetadata(
+  response: Response,
+  content: string,
+): ProviderFailureMetadata {
+  let providerCode: string | undefined;
+  let requestId = response.headers.get("x-request-id")?.trim() || undefined;
+  try {
+    const payload = JSON.parse(content) as Record<string, unknown>;
+    const nestedError =
+      typeof payload.error === "object" && payload.error !== null
+        ? (payload.error as Record<string, unknown>)
+        : undefined;
+    const rawCode = payload.code ?? nestedError?.code;
+    const rawRequestId = payload.requestId ?? nestedError?.requestId;
+    if (typeof rawCode === "string" && rawCode) providerCode = rawCode;
+    if (typeof rawRequestId === "string" && rawRequestId) {
+      requestId = rawRequestId;
+    }
   } catch {
-    return "";
+    // Raw provider content is deliberately excluded from normalized errors.
   }
+  const retryAfterMs = retryAfterMilliseconds(response);
+  return {
+    status: response.status,
+    ...(providerCode ? { providerCode } : {}),
+    ...(requestId ? { requestId } : {}),
+    ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+  };
 }
 
-function waitForRetry(milliseconds: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(new DOMException("翻译已取消", "AbortError"));
-  }
-  return new Promise((resolve, reject) => {
-    const timer = globalThis.setTimeout(finish, milliseconds);
-    function finish() {
-      signal?.removeEventListener("abort", abort);
-      resolve();
-    }
-    function abort() {
-      globalThis.clearTimeout(timer);
-      reject(new DOMException("翻译已取消", "AbortError"));
-    }
-    signal?.addEventListener("abort", abort, { once: true });
-  });
-}
-
-async function fetchWithFirstByteTimeout(
+async function fetchProviderResponse(
   input: string,
   init: RequestInit,
   externalSignal: AbortSignal | undefined,
   timeoutMs: number,
 ): Promise<Response> {
+  const endpoint = browserEndpoint(input);
   const controller = new AbortController();
   let timedOut = false;
-  const forwardAbort = () => controller.abort(externalSignal?.reason);
-  if (externalSignal?.aborted) {
-    forwardAbort();
-  } else {
-    externalSignal?.addEventListener("abort", forwardAbort, { once: true });
-  }
+  const requestSignal = externalSignal
+    ? AbortSignal.any([externalSignal, controller.signal])
+    : controller.signal;
   const timer = globalThis.setTimeout(() => {
     timedOut = true;
     controller.abort();
   }, timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(endpoint, { ...init, signal: requestSignal });
   } catch (error) {
+    if (externalSignal?.aborted) {
+      throw externalSignal.reason ?? error;
+    }
     if (timedOut) {
-      throw new ProviderTimeoutError(
-        `大模型服务在 ${Math.max(1, Math.round(timeoutMs / 1_000))} 秒内没有开始响应。请换用更快的模型或稍后重试。`,
-        { cause: error },
+      throw new TranslationProviderError(
+        TranslationErrorCode.ProviderTimeout,
+        "Provider did not start responding before the request timeout.",
+        {
+          cause: error,
+          retryable: true,
+          details: { timeoutMs },
+        },
       );
     }
-    throw error;
+    throw new TranslationProviderError(
+      TranslationErrorCode.ProviderNetwork,
+      "Unable to connect to the provider.",
+      { cause: error, retryable: true },
+    );
   } finally {
     globalThis.clearTimeout(timer);
-    externalSignal?.removeEventListener("abort", forwardAbort);
   }
 }
 
-async function fetchWithTransientRetry(
-  input: string,
-  init: RequestInit,
-  externalSignal: AbortSignal | undefined,
-  timeoutMs: number,
-  onActivity?: (activity: TranslationActivity) => void,
-): Promise<Response> {
-  for (let attempt = 0; ; attempt += 1) {
-    const response = await fetchWithFirstByteTimeout(
-      input,
-      init,
-      externalSignal,
-      timeoutMs,
+async function providerResponseText(
+  response: Response,
+  signal?: AbortSignal,
+): Promise<string> {
+  try {
+    return await response.text();
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    throw new TranslationProviderError(
+      TranslationErrorCode.ProviderNetwork,
+      "Unable to read the provider response.",
+      { cause: error, retryable: true },
     );
-    const retryableStatus = response.status === 429 || response.status === 503;
-    const errorCode = retryableStatus
-      ? await responseErrorCode(response)
-      : "";
-    const quotaIsExhausted = errorCode === "daily_quota_exceeded";
-    if (
-      !retryableStatus ||
-      quotaIsExhausted ||
-      attempt >= MAX_TRANSIENT_RETRIES
-    ) {
-      return response;
-    }
-
-    const retryAfterMs = retryAfterMilliseconds(response);
-    await response.body?.cancel().catch(() => undefined);
-    onActivity?.({
-      phase: "retry",
-      receivedCharacters: 0,
-      retryAfterMs,
-      attempt: attempt + 1,
-      retryReason: "busy",
-    });
-    await waitForRetry(retryAfterMs, externalSignal);
   }
+}
+
+const PROVIDER_RESPONSE_RETRY_INSTRUCTION = [
+  "RESPONSE FORMAT RETRY: Return a complete translation result in the requested JSON shape.",
+  "Return every requested id exactly once and do not add explanatory text.",
+].join(" ");
+
+function providerResponseError(
+  code:
+    | typeof TranslationErrorCode.ResponseInvalidContainer
+    | typeof TranslationErrorCode.ResponseInvalidItem
+    | typeof TranslationErrorCode.ResponseMissingId,
+  message: string,
+  details?: Readonly<Record<string, unknown>>,
+  cause?: unknown,
+): TranslationResponseError {
+  return new TranslationResponseError(code, message, {
+    ...(cause === undefined ? {} : { cause }),
+    ...(details === undefined ? {} : { details }),
+    retryInstruction: PROVIDER_RESPONSE_RETRY_INSTRUCTION,
+  });
 }
 
 function parseJson(content: string, message: string): unknown {
@@ -149,6 +253,19 @@ function parseJson(content: string, message: string): unknown {
     return JSON.parse(content);
   } catch (error) {
     throw new OfficeTranslationError(message, { cause: error });
+  }
+}
+
+function parseProviderJson(content: string, message: string): unknown {
+  try {
+    return JSON.parse(content);
+  } catch (cause) {
+    throw providerResponseError(
+      TranslationErrorCode.ResponseInvalidContainer,
+      message,
+      undefined,
+      cause,
+    );
   }
 }
 
@@ -175,7 +292,14 @@ function normalize(
   if (Array.isArray(value)) {
     if (value.every((item) => typeof item === "string")) {
       if (value.length !== request.items.length) {
-        throw new OfficeTranslationError("大模型服务返回的文本数量不正确。");
+        throw providerResponseError(
+          TranslationErrorCode.ResponseMissingId,
+          "Provider returned the wrong number of translations.",
+          {
+            actualCount: value.length,
+            expectedCount: request.items.length,
+          },
+        );
       }
       return value.map((text, index) => ({
         id: request.items[index]!.id,
@@ -203,8 +327,9 @@ function normalize(
       }));
     }
   }
-  throw new OfficeTranslationError(
-    "大模型服务响应应包含字符串数组、{id,text} 数组或 id 到文本的对象。",
+  throw providerResponseError(
+    TranslationErrorCode.ResponseInvalidContainer,
+    "Provider response does not contain a supported translation collection.",
   );
 }
 
@@ -256,20 +381,32 @@ function parseModelTranslations(
       // Try a complete JSON object embedded in a short model explanation.
     }
   }
-  throw new OfficeTranslationError("模型没有返回规定的 JSON 结果。");
+  throw providerResponseError(
+    TranslationErrorCode.ResponseInvalidContainer,
+    "Model did not return the required translation JSON.",
+  );
 }
 
 function chatContent(payload: unknown): string {
   if (typeof payload !== "object" || payload === null) {
-    throw new OfficeTranslationError("兼容聊天接口返回了无效响应。");
+    throw providerResponseError(
+      TranslationErrorCode.ResponseInvalidContainer,
+      "Chat provider returned an invalid response.",
+    );
   }
   const choices = (payload as Record<string, unknown>).choices;
   if (!Array.isArray(choices) || !choices.length) {
-    throw new OfficeTranslationError("兼容聊天接口没有返回候选结果。");
+    throw providerResponseError(
+      TranslationErrorCode.ResponseInvalidContainer,
+      "Chat provider response has no choices.",
+    );
   }
   const message = (choices[0] as Record<string, unknown>).message;
   if (typeof message !== "object" || message === null) {
-    throw new OfficeTranslationError("兼容聊天接口没有返回消息内容。");
+    throw providerResponseError(
+      TranslationErrorCode.ResponseInvalidItem,
+      "Chat provider response has no message.",
+    );
   }
   const content = (message as Record<string, unknown>).content;
   if (typeof content === "string") return content;
@@ -284,7 +421,10 @@ function chatContent(payload: unknown): string {
       )
       .join("");
   }
-  throw new OfficeTranslationError("兼容聊天接口返回了不支持的内容类型。");
+  throw providerResponseError(
+    TranslationErrorCode.ResponseInvalidItem,
+    "Chat provider returned an unsupported content type.",
+  );
 }
 
 function chatDelta(payload: unknown): {
@@ -296,10 +436,16 @@ function chatDelta(payload: unknown): {
   }
   const error = (payload as Record<string, unknown>).error;
   if (typeof error === "object" && error !== null) {
-    const message = (error as Record<string, unknown>).message;
-    throw new OfficeTranslationError(
-      typeof message === "string" ? message : "大模型服务返回了流式错误。",
-    );
+    const record = error as Record<string, unknown>;
+    throw normalizedProviderError({
+      status: 502,
+      ...(typeof record.code === "string"
+        ? { providerCode: record.code }
+        : {}),
+      ...(typeof record.requestId === "string"
+        ? { requestId: record.requestId }
+        : {}),
+    });
   }
   const choices = (payload as Record<string, unknown>).choices;
   if (!Array.isArray(choices) || !choices.length) {
@@ -319,12 +465,34 @@ function chatDelta(payload: unknown): {
   };
 }
 
+async function readStreamChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  try {
+    return await reader.read();
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason ?? error;
+    if (isTranslationCoreError(error)) throw error;
+    throw new TranslationProviderError(
+      TranslationErrorCode.ProviderNetwork,
+      "Unable to read the provider response stream.",
+      { cause: error, retryable: true },
+    );
+  }
+}
+
 async function readChatEventStream(
   response: Response,
   onActivity?: (activity: TranslationActivity) => void,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!response.body) {
-    throw new OfficeTranslationError("浏览器无法读取大模型服务的流式响应。");
+    throw new TranslationProviderError(
+      TranslationErrorCode.ProviderNetwork,
+      "Provider response stream is unavailable.",
+      { retryable: true },
+    );
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -338,7 +506,7 @@ async function readChatEventStream(
     if (!data) return false;
     if (data === "[DONE]") return true;
     const delta = chatDelta(
-      parseJson(data, "兼容聊天接口返回了无效的流式数据。"),
+      parseProviderJson(data, "Chat provider returned invalid stream data."),
     );
     content += delta.content;
     receivedCharacters += delta.activityCharacters;
@@ -346,27 +514,46 @@ async function readChatEventStream(
     return false;
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const lines = buffer.split(/\r?\n/u);
-    buffer = lines.pop() ?? "";
-    let finished = false;
-    for (const line of lines) {
-      if (processLine(line)) finished = true;
+  let streamClosed = false;
+  try {
+    while (true) {
+      const { value, done } = await readStreamChunk(reader, signal);
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split(/\r?\n/u);
+      buffer = lines.pop() ?? "";
+      let finished = false;
+      for (const line of lines) {
+        if (processLine(line)) finished = true;
+      }
+      if (finished) {
+        await reader.cancel().catch(() => undefined);
+        streamClosed = true;
+        break;
+      }
+      if (done) {
+        streamClosed = true;
+        break;
+      }
     }
-    if (finished || done) break;
+    if (buffer) processLine(buffer);
+    return content;
+  } finally {
+    if (!streamClosed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  if (buffer) processLine(buffer);
-  return content;
 }
 
 async function readGenericEventStream(
   response: Response,
   onActivity?: (activity: TranslationActivity) => void,
+  signal?: AbortSignal,
 ): Promise<unknown> {
   if (!response.body) {
-    throw new OfficeTranslationError("浏览器无法读取翻译接口的流式响应。");
+    throw new TranslationProviderError(
+      TranslationErrorCode.ProviderNetwork,
+      "Provider response stream is unavailable.",
+      { retryable: true },
+    );
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -381,9 +568,9 @@ async function readGenericEventStream(
       eventName = "message";
       return;
     }
-    const payload = parseJson(
+    const payload = parseProviderJson(
       dataLines.join("\n"),
-      "翻译接口返回了无效的流式数据。",
+      "Provider returned invalid stream data.",
     );
     const record =
       typeof payload === "object" && payload !== null
@@ -417,20 +604,22 @@ async function readGenericEventStream(
       result = payload;
       resultReceived = true;
     } else if (eventName === "error") {
-      const message =
-        typeof record.error === "string"
-          ? record.error
-          : "翻译接口返回了流式错误。";
       const requestId =
         typeof record.requestId === "string"
           ? record.requestId
           : response.headers.get("x-request-id") ?? "";
-      const fullMessage =
-        message + (requestId ? `（请求 ID：${requestId}）` : "");
-      if (record.code === "upstream_timeout") {
-        throw new ProviderTimeoutError(fullMessage);
-      }
-      throw new OfficeTranslationError(fullMessage);
+      throw normalizedProviderError({
+        ...(typeof record.status === "number"
+          ? { status: record.status }
+          : {}),
+        ...(typeof record.code === "string"
+          ? { providerCode: record.code }
+          : {}),
+        ...(requestId ? { requestId } : {}),
+        ...(typeof record.retryAfterMs === "number"
+          ? { retryAfterMs: record.retryAfterMs }
+          : {}),
+      });
     }
     eventName = "message";
     dataLines = [];
@@ -449,41 +638,40 @@ async function readGenericEventStream(
     }
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const lines = buffer.split(/\r?\n/u);
-    buffer = lines.pop() ?? "";
-    for (const line of lines) processLine(line);
-    if (resultReceived) {
-      await reader.cancel().catch(() => undefined);
-      return result;
+  let streamClosed = false;
+  try {
+    while (true) {
+      const { value, done } = await readStreamChunk(reader, signal);
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split(/\r?\n/u);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) processLine(line);
+      if (resultReceived) {
+        await reader.cancel().catch(() => undefined);
+        streamClosed = true;
+        return result;
+      }
+      if (done) {
+        streamClosed = true;
+        break;
+      }
     }
-    if (done) break;
+    if (buffer) processLine(buffer);
+    dispatch();
+    if (resultReceived) return result;
+    throw providerResponseError(
+      TranslationErrorCode.ResponseInvalidContainer,
+      "Provider response stream ended before returning a result.",
+    );
+  } finally {
+    if (!streamClosed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
   }
-  if (buffer) processLine(buffer);
-  dispatch();
-  if (resultReceived) return result;
-  throw new OfficeTranslationError("翻译接口的流式响应在返回结果前结束。");
 }
 
 function assertResponse(response: Response, content: string): void {
   if (!response.ok) {
-    let serviceMessage = content.slice(0, 240);
-    let requestId = response.headers.get("x-request-id") ?? "";
-    try {
-      const payload = JSON.parse(content) as Record<string, unknown>;
-      if (typeof payload.error === "string") serviceMessage = payload.error;
-      if (typeof payload.requestId === "string") requestId = payload.requestId;
-    } catch {
-      // Keep the truncated plain-text response.
-    }
-    throw new OfficeTranslationError(
-      "大模型服务返回 HTTP " +
-        response.status +
-        (serviceMessage ? "：" + serviceMessage : "") +
-        (requestId ? `（请求 ID：${requestId}）` : ""),
-    );
+    throw normalizedProviderError(responseFailureMetadata(response, content));
   }
 }
 
@@ -521,30 +709,35 @@ export class BrowserChatProvider implements TranslationProvider {
     const fastMode = this.settings.fastMode !== false;
     const disableThinking =
       fastMode && supportsThinkingSwitch(this.settings.baseUrl);
-    const response = await fetchWithTransientRetry(endpoint, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: this.settings.model,
-        stream: fastMode,
-        ...(fastMode ? { max_tokens: 3_072 } : {}),
-        ...(disableThinking ? { enable_thinking: false } : {}),
-        messages: [
-          { role: "system", content: system },
-          {
-            role: "user",
-            content: JSON.stringify({
-              sourceLanguage: request.sourceLanguage ?? "auto",
-              targetLanguage: request.targetLanguage,
-              instructions: request.instructions ?? "",
-              items: request.items,
-            }),
-          },
-        ],
-      }),
-    }, signal, this.settings.requestTimeoutMs ?? 30_000, onActivity);
+    const response = await fetchProviderResponse(
+      endpoint,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: this.settings.model,
+          stream: fastMode,
+          ...(fastMode ? { max_tokens: 3_072 } : {}),
+          ...(disableThinking ? { enable_thinking: false } : {}),
+          messages: [
+            { role: "system", content: system },
+            {
+              role: "user",
+              content: JSON.stringify({
+                sourceLanguage: request.sourceLanguage ?? "auto",
+                targetLanguage: request.targetLanguage,
+                instructions: request.instructions ?? "",
+                items: request.items,
+              }),
+            },
+          ],
+        }),
+      },
+      signal,
+      this.settings.requestTimeoutMs ?? 30_000,
+    );
     if (!response.ok) {
-      const errorContent = await response.text();
+      const errorContent = await providerResponseText(response, signal);
       assertResponse(response, errorContent);
     }
     const isEventStream =
@@ -552,11 +745,14 @@ export class BrowserChatProvider implements TranslationProvider {
       false;
     let modelContent: string;
     if (fastMode && isEventStream) {
-      modelContent = await readChatEventStream(response, onActivity);
+      modelContent = await readChatEventStream(response, onActivity, signal);
     } else {
-      const raw = await response.text();
+      const raw = await providerResponseText(response, signal);
       onActivity?.({ phase: "response", receivedCharacters: raw.length });
-      const payload = parseJson(raw, "兼容聊天接口返回的不是有效 JSON。");
+      const payload = parseProviderJson(
+        raw,
+        "Chat provider returned invalid JSON.",
+      );
       modelContent = chatContent(payload);
     }
     return parseModelTranslations(modelContent, request);
@@ -585,28 +781,40 @@ export class BrowserGenericProvider implements TranslationProvider {
     signal?: AbortSignal,
     onActivity?: (activity: TranslationActivity) => void,
   ): Promise<TranslationOutputItem[]> {
-    const response = await fetchWithTransientRetry(this.settings.url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...resolvedHeaders(this.settings.headers, this.settings.apiKey),
+    const response = await fetchProviderResponse(
+      this.settings.url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...resolvedHeaders(this.settings.headers, this.settings.apiKey),
+        },
+        body: JSON.stringify(request),
       },
-      body: JSON.stringify(request),
-    }, signal, this.settings.requestTimeoutMs ?? 30_000, onActivity);
+      signal,
+      this.settings.requestTimeoutMs ?? 30_000,
+    );
     const isEventStream =
       response.headers.get("content-type")?.includes("text/event-stream") ??
       false;
     if (response.ok && isEventStream) {
-      const payload = await readGenericEventStream(response, onActivity);
+      const payload = await readGenericEventStream(
+        response,
+        onActivity,
+        signal,
+      );
       return normalize(
         readPath(payload, this.settings.responsePath ?? "translations"),
         request,
       );
     }
-    const raw = await response.text();
+    const raw = await providerResponseText(response, signal);
     onActivity?.({ phase: "response", receivedCharacters: raw.length });
     assertResponse(response, raw);
-    const payload = parseJson(raw, "通用 HTTP 接口返回的不是有效 JSON。");
+    const payload = parseProviderJson(
+      raw,
+      "Generic HTTP provider returned invalid JSON.",
+    );
     return normalize(
       readPath(payload, this.settings.responsePath ?? "translations"),
       request,

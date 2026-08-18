@@ -1,4 +1,6 @@
 import {
+  TranslationConfigurationError,
+  TranslationErrorCode,
   TranslationPlanError,
   TranslationResponseError,
 } from "./errors.js";
@@ -37,7 +39,17 @@ function positiveInteger(
 ): number {
   const resolved = value ?? fallback;
   if (!Number.isInteger(resolved) || resolved < 1) {
-    throw new TranslationPlanError(label + " must be a positive integer.");
+    throw new TranslationConfigurationError(
+      TranslationErrorCode.ConfigInvalidIntegerOption,
+      label + " must be a positive integer.",
+      {
+        details: {
+          option: label,
+          value: resolved,
+          minimum: 1,
+        },
+      },
+    );
   }
   return resolved;
 }
@@ -45,25 +57,39 @@ function positiveInteger(
 function validatePlan<TContext>(plan: TranslationPlan<TContext>): void {
   if (plan.schemaVersion !== 1) {
     throw new TranslationPlanError(
+      TranslationErrorCode.PlanUnsupportedSchema,
       "Unsupported translation plan schema: " + plan.schemaVersion,
+      { details: { schemaVersion: plan.schemaVersion } },
     );
   }
   if (!plan.document.id.trim()) {
-    throw new TranslationPlanError("Translation plan document.id is required.");
+    throw new TranslationPlanError(
+      TranslationErrorCode.PlanDocumentIdRequired,
+      "Translation plan document.id is required.",
+      { details: { field: "document.id" } },
+    );
   }
   if (!plan.document.format.trim()) {
     throw new TranslationPlanError(
+      TranslationErrorCode.PlanDocumentFormatRequired,
       "Translation plan document.format is required.",
+      { details: { field: "document.format" } },
     );
   }
   const ids = new Set<string>();
   for (const unit of plan.units) {
     if (!unit.id.trim()) {
-      throw new TranslationPlanError("Translation unit id is required.");
+      throw new TranslationPlanError(
+        TranslationErrorCode.PlanUnitIdRequired,
+        "Translation unit id is required.",
+        { details: { field: "unit.id" } },
+      );
     }
     if (ids.has(unit.id)) {
       throw new TranslationPlanError(
+        TranslationErrorCode.PlanDuplicateUnitId,
         "Translation plan contains a duplicate id: " + unit.id,
+        { details: { unitId: unit.id } },
       );
     }
     ids.add(unit.id);
@@ -80,8 +106,10 @@ function uniqueUnits<TContext>(
     if (existing) {
       if (existing.item.text !== unit.text) {
         throw new TranslationPlanError(
+          TranslationErrorCode.PlanDedupeTextMismatch,
           "Translation units with the same dedupeKey must have identical text: " +
             key,
+          { details: { dedupeKey: key } },
         );
       }
       existing.occurrenceIds.push(unit.id);
@@ -151,13 +179,14 @@ async function validateOutput<TContext>(
 ): Promise<Map<string, string>> {
   if (!Array.isArray(output)) {
     throw new TranslationResponseError(
+      TranslationErrorCode.ResponseInvalidContainer,
       "The provider must return an array of { id, text } objects.",
       { retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION },
     );
   }
   const expectedIds = new Set(batch.items.map(({ item }) => item.id));
   const result = new Map<string, string>();
-  for (const item of output) {
+  for (const [outputIndex, item] of output.entries()) {
     if (
       typeof item !== "object" ||
       item === null ||
@@ -165,20 +194,32 @@ async function validateOutput<TContext>(
       typeof item.text !== "string"
     ) {
       throw new TranslationResponseError(
+        TranslationErrorCode.ResponseInvalidItem,
         "The provider returned an invalid translation item.",
-        { retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION },
+        {
+          details: { outputIndex },
+          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
+        },
       );
     }
     if (!expectedIds.has(item.id)) {
       throw new TranslationResponseError(
+        TranslationErrorCode.ResponseUnexpectedId,
         "The provider returned an unexpected translation id: " + item.id,
-        { retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION },
+        {
+          details: { unitId: item.id },
+          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
+        },
       );
     }
     if (result.has(item.id)) {
       throw new TranslationResponseError(
+        TranslationErrorCode.ResponseDuplicateId,
         "The provider returned a duplicate translation id: " + item.id,
-        { retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION },
+        {
+          details: { unitId: item.id },
+          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
+        },
       );
     }
     result.set(item.id, item.text);
@@ -191,8 +232,12 @@ async function validateOutput<TContext>(
       (!translatedText.trim() && entry.item.text.trim())
     ) {
       throw new TranslationResponseError(
+        TranslationErrorCode.ResponseMissingId,
         "The provider omitted translation id: " + entry.item.id,
-        { retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION },
+        {
+          details: { unitId: entry.item.id },
+          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
+        },
       );
     }
     const qualityItem: TranslationInputItem<TContext> = {
@@ -208,13 +253,20 @@ async function validateOutput<TContext>(
     });
     if (issue) {
       throw new TranslationResponseError(
+        TranslationErrorCode.ResponseQualityRejected,
         issue.message,
-        issue.retryInstruction === undefined
-          ? { reason: "quality" }
-          : {
-              reason: "quality",
-              retryInstruction: issue.retryInstruction,
-            },
+        {
+          details: {
+            ...issue.details,
+            ...(issue.issueCode === undefined
+              ? {}
+              : { issueCode: issue.issueCode }),
+            unitId: entry.item.id,
+          },
+          ...(issue.retryInstruction === undefined
+            ? {}
+            : { retryInstruction: issue.retryInstruction }),
+        },
       );
     }
   }
@@ -265,7 +317,11 @@ export async function translatePlan<TContext>(
 ): Promise<TranslationResult> {
   validatePlan(plan);
   if (!options.targetLanguage.trim()) {
-    throw new TranslationPlanError("targetLanguage is required.");
+    throw new TranslationConfigurationError(
+      TranslationErrorCode.ConfigTargetLanguageRequired,
+      "targetLanguage is required.",
+      { details: { option: "targetLanguage" } },
+    );
   }
   const batchSize = positiveInteger(options.batchSize, 40, "batchSize");
   const maxBatchCharacters = positiveInteger(

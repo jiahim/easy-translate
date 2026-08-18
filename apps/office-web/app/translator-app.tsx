@@ -35,6 +35,7 @@ import {
 import {
   inspectOfficeFile,
   OfficeTranslationError,
+  translateProviderBatchWithRetry,
   translateOfficeFileInBrowser,
   type InspectResult,
   type OfficeScopeOptions,
@@ -43,6 +44,7 @@ import {
   type TranslationProgress,
   type TranslationProvider,
 } from "../lib/office";
+import { localizedCoreError } from "../lib/errors";
 import {
   BrowserChatProvider,
   BrowserGenericProvider,
@@ -410,6 +412,8 @@ function friendlyError(error: unknown): string {
   if (error instanceof DOMException && error.name === "AbortError") {
     return "翻译已取消，原文件没有发生变化。";
   }
+  const coreMessage = localizedCoreError(error);
+  if (coreMessage) return coreMessage;
   if (error instanceof TypeError && /fetch|network|failed/iu.test(error.message)) {
     return "无法连接大模型服务。请检查接口地址、网络以及服务是否允许浏览器跨域访问（CORS）。";
   }
@@ -1023,7 +1027,7 @@ export function TranslatorApp() {
     setProviderMessage("");
     try {
       const activeProvider = await createProvider();
-      const result = await activeProvider.translateBatch({
+      const result = await translateProviderBatchWithRetry(activeProvider, {
         sourceLanguage:
           sourceLanguage === "auto" ? undefined : sourceLanguage,
         targetLanguage,

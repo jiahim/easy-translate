@@ -1,8 +1,22 @@
 export {
+  TranslationConfigurationError,
   TranslationCoreError,
+  TranslationErrorCode,
+  isTranslationCoreError,
   TranslationPlanError,
   TranslationProviderError,
   TranslationResponseError,
+} from "./errors.js";
+export type {
+  TranslationConfigurationErrorCode,
+  TranslationCoreErrorOptions,
+  TranslationErrorDetails,
+  TranslationPlanErrorCode,
+  TranslationProviderErrorCode,
+  TranslationProviderErrorKind,
+  TranslationProviderErrorOptions,
+  TranslationResponseErrorCode,
+  TranslationResponseErrorOptions,
 } from "./errors.js";
 export { translatePlan } from "./engine.js";
 export { retryOperation } from "./retry.js";

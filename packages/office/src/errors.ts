@@ -1,7 +1,35 @@
+import {
+  TranslationErrorCode,
+  TranslationResponseError,
+  type TranslationResponseErrorCode,
+  type TranslationResponseErrorOptions,
+} from "@easy-translate/core";
+
+const officeTranslatorErrorBrand = Symbol("OfficeTranslatorError");
+
+function brandAsOfficeTranslatorError(error: object): void {
+  Object.defineProperty(error, officeTranslatorErrorBrand, { value: true });
+}
+
 export class OfficeTranslatorError extends Error {
+  static [Symbol.hasInstance](value: unknown): boolean {
+    const defaultMatch = Function.prototype[Symbol.hasInstance].call(
+      this,
+      value,
+    ) as boolean;
+    if (this !== OfficeTranslatorError) return defaultMatch;
+    return (
+      defaultMatch ||
+      (typeof value === "object" &&
+        value !== null &&
+        officeTranslatorErrorBrand in value)
+    );
+  }
+
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "OfficeTranslatorError";
+    brandAsOfficeTranslatorError(this);
   }
 }
 
@@ -17,9 +45,21 @@ export class UnsupportedOfficeFormatError extends OfficeTranslatorError {
   }
 }
 
-export class ProviderResponseError extends OfficeTranslatorError {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
+export class ProviderResponseError extends TranslationResponseError {
+  constructor(
+    message: string,
+    options: TranslationResponseErrorOptions & {
+      code?: TranslationResponseErrorCode;
+    } = {},
+  ) {
+    const {
+      code = TranslationErrorCode.ResponseInvalidContainer,
+      ...errorOptions
+    } = options;
+    super(code, message, errorOptions);
     this.name = "ProviderResponseError";
+    // Preserve the public pre-typed-error `instanceof OfficeTranslatorError`
+    // contract while also participating in core response-error retries.
+    brandAsOfficeTranslatorError(this);
   }
 }

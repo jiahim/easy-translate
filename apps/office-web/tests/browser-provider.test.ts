@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  ProviderTimeoutError,
   type TranslationActivity,
   type TranslationBatchRequest,
 } from "../lib/office.js";
+import {
+  TranslationErrorCode,
+  TranslationProviderError,
+  TranslationResponseError,
+} from "@easy-translate/core";
 import {
   BrowserChatProvider,
   BrowserGenericProvider,
@@ -77,6 +81,43 @@ describe("browser chat provider", () => {
     }
   });
 
+  it("cancels and releases a chat stream after the DONE event", async () => {
+    const originalFetch = globalThis.fetch;
+    let cancelled = false;
+    globalThis.fetch = (async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'data: {"choices":[{"delta":{"content":"{\\"translations\\":[{\\"id\\":\\"one\\",\\"text\\":\\"你好\\"}]}"}}]}\n\n' +
+                "data: [DONE]\n\n",
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return new Response(stream, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const provider = new BrowserChatProvider({
+        baseUrl: "https://provider.test/v1",
+        model: "streaming-model",
+        fastMode: true,
+      });
+      assert.deepEqual(await provider.translateBatch(request), [
+        { id: "one", text: "你好" },
+      ]);
+      assert.equal(cancelled, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("fails clearly when the provider sends no response headers", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = ((_input, init) =>
@@ -98,9 +139,59 @@ describe("browser chat provider", () => {
       await assert.rejects(
         provider.translateBatch(request),
         (error: unknown) =>
-          error instanceof ProviderTimeoutError &&
-          /1 秒内没有开始响应/u.test(error.message),
+          error instanceof TranslationProviderError &&
+          error.code === TranslationErrorCode.ProviderTimeout &&
+          error.retryable,
       );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("keeps caller cancellation linked while reading the response body", async () => {
+    const originalFetch = globalThis.fetch;
+    const externalController = new AbortController();
+    const cancellation = new Error("caller cancelled");
+    let requestSignal: AbortSignal | undefined;
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    globalThis.fetch = (async (_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+          requestSignal?.addEventListener(
+            "abort",
+            () => controller.error(requestSignal?.reason),
+            { once: true },
+          );
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const provider = new BrowserChatProvider({
+        baseUrl: "https://provider.test/v1",
+        model: "streaming-model",
+        fastMode: true,
+      });
+      const pending = provider.translateBatch(
+        request,
+        externalController.signal,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      externalController.abort(cancellation);
+      const signalStayedLinked = requestSignal?.aborted;
+      if (!signalStayedLinked) streamController?.error(cancellation);
+
+      await assert.rejects(pending, (error: unknown) => error === cancellation);
+      assert.equal(signalStayedLinked, true);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -133,9 +224,59 @@ describe("browser chat provider", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("classifies malformed model JSON as a retryable response error", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json({
+        choices: [{ message: { content: "not a translation object" } }],
+      })) as typeof fetch;
+
+    try {
+      const provider = new BrowserChatProvider({
+        baseUrl: "https://provider.test/v1",
+        model: "malformed-json-model",
+        fastMode: false,
+      });
+      await assert.rejects(
+        provider.translateBatch(request),
+        (error: unknown) => {
+          assert.ok(error instanceof TranslationResponseError);
+          assert.equal(
+            error.code,
+            TranslationErrorCode.ResponseInvalidContainer,
+          );
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("browser generic provider", () => {
+  it("accepts a bare relative browser endpoint", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestedEndpoint: RequestInfo | URL | undefined;
+    globalThis.fetch = (async (input) => {
+      requestedEndpoint = input;
+      return Response.json({
+        translations: [{ id: "one", text: "你好" }],
+      });
+    }) as typeof fetch;
+
+    try {
+      const provider = new BrowserGenericProvider({ url: "api/translate" });
+      assert.deepEqual(await provider.translateBatch(request), [
+        { id: "one", text: "你好" },
+      ]);
+      assert.equal(requestedEndpoint, "api/translate");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("reads activity and validated results from the trial event stream", async () => {
     const originalFetch = globalThis.fetch;
     const activities: TranslationActivity[] = [];
@@ -180,7 +321,7 @@ describe("browser generic provider", () => {
     }
   });
 
-  it("includes the request ID from a trial stream error", async () => {
+  it("normalizes a trial stream error without exposing its raw message", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response(
@@ -192,12 +333,13 @@ describe("browser generic provider", () => {
       const provider = new BrowserGenericProvider({ url: "/api/translate" });
       await assert.rejects(
         provider.translateBatch(request),
-        (error) => {
-          assert.ok(error instanceof ProviderTimeoutError);
-          assert.match(
-            error.message,
-            /连接免费翻译模型超时.*请求 ID：stream-error-id/u,
-          );
+        (error: unknown) => {
+          assert.ok(error instanceof TranslationProviderError);
+          assert.equal(error.code, TranslationErrorCode.ProviderTimeout);
+          assert.equal(error.retryable, true);
+          assert.equal(error.providerCode, "upstream_timeout");
+          assert.equal(error.details.requestId, "stream-error-id");
+          assert.doesNotMatch(error.message, /连接免费翻译模型超时/u);
           return true;
         },
       );
@@ -206,31 +348,74 @@ describe("browser generic provider", () => {
     }
   });
 
-  it("waits and retries transient concurrency limits", async () => {
+  it("cancels and releases a generic stream when event parsing fails", async () => {
+    const originalFetch = globalThis.fetch;
+    let cancelled = false;
+    globalThis.fetch = (async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode("event: result\ndata: not-json\n\n"),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return new Response(stream, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const provider = new BrowserGenericProvider({ url: "/api/translate" });
+      await assert.rejects(
+        provider.translateBatch(request),
+        (error: unknown) => error instanceof TranslationResponseError,
+      );
+      assert.equal(cancelled, true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("delegates transient HTTP retries to core and preserves metadata", async () => {
     const originalFetch = globalThis.fetch;
     let attempts = 0;
     const activities: TranslationActivity[] = [];
     globalThis.fetch = (async () => {
       attempts += 1;
-      if (attempts === 1) {
-        return Response.json(
-          { error: "当前翻译任务较多，请稍后再试。", code: "concurrency_exceeded" },
-          { status: 429, headers: { "retry-after": "0" } },
-        );
-      }
-      return Response.json({ translations: [{ id: "one", text: "你好" }] });
+      return Response.json(
+        {
+          error: "raw concurrency diagnostic",
+          code: "concurrency_exceeded",
+          requestId: "busy-request-id",
+        },
+        { status: 429, headers: { "retry-after": "0.001" } },
+      );
     }) as typeof fetch;
 
     try {
       const provider = new BrowserGenericProvider({ url: "/api/translate" });
-      const output = await provider.translateBatch(
-        request,
-        undefined,
-        (activity) => activities.push(activity),
+      await assert.rejects(
+        provider.translateBatch(
+          request,
+          undefined,
+          (activity) => activities.push(activity),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof TranslationProviderError);
+          assert.equal(error.code, TranslationErrorCode.ProviderRateLimit);
+          assert.equal(error.retryable, true);
+          assert.equal(error.retryAfterMs, 1);
+          assert.equal(error.providerCode, "concurrency_exceeded");
+          assert.equal(error.details.requestId, "busy-request-id");
+          assert.doesNotMatch(error.message, /raw concurrency diagnostic/u);
+          return true;
+        },
       );
-      assert.equal(attempts, 2);
-      assert.equal(activities[0]?.phase, "retry");
-      assert.deepEqual(output, [{ id: "one", text: "你好" }]);
+      assert.equal(attempts, 1);
+      assert.ok(activities.every((activity) => activity.phase !== "retry"));
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -249,14 +434,23 @@ describe("browser generic provider", () => {
 
     try {
       const provider = new BrowserGenericProvider({ url: "/api/translate" });
-      await assert.rejects(provider.translateBatch(request), /每日|额度已用完/u);
+      await assert.rejects(
+        provider.translateBatch(request),
+        (error: unknown) => {
+          assert.ok(error instanceof TranslationProviderError);
+          assert.equal(error.code, TranslationErrorCode.ProviderRateLimit);
+          assert.equal(error.retryable, false);
+          assert.equal(error.providerCode, "daily_quota_exceeded");
+          return true;
+        },
+      );
       assert.equal(attempts, 1);
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it("includes the server request ID in error messages", async () => {
+  it("preserves a server request ID as safe structured detail", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () =>
       Response.json(
@@ -272,9 +466,44 @@ describe("browser generic provider", () => {
       const provider = new BrowserGenericProvider({ url: "/api/translate" });
       await assert.rejects(
         provider.translateBatch(request),
-        (error: unknown) =>
-          error instanceof Error &&
-          error.message.includes("请求 ID：diagnostic-request-id"),
+        (error: unknown) => {
+          assert.ok(error instanceof TranslationProviderError);
+          assert.equal(error.code, TranslationErrorCode.ProviderTimeout);
+          assert.equal(error.details.requestId, "diagnostic-request-id");
+          assert.doesNotMatch(error.message, /连接免费翻译模型超时/u);
+          return true;
+        },
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("prioritizes an HTTP authentication status over a conflicting provider code", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      Response.json(
+        {
+          error: "raw upstream diagnostic",
+          code: "upstream_timeout",
+        },
+        { status: 401 },
+      )) as typeof fetch;
+
+    try {
+      const provider = new BrowserGenericProvider({ url: "/api/translate" });
+      await assert.rejects(
+        provider.translateBatch(request),
+        (error: unknown) => {
+          assert.ok(error instanceof TranslationProviderError);
+          assert.equal(
+            error.code,
+            TranslationErrorCode.ProviderAuthentication,
+          );
+          assert.equal(error.retryable, false);
+          assert.equal(error.providerCode, "upstream_timeout");
+          return true;
+        },
       );
     } finally {
       globalThis.fetch = originalFetch;

@@ -28,6 +28,10 @@ const result = await translateOfficeBuffer(input, "report.docx", {
 
 底层 adapter 可从 `@easy-translate/office/office-adapter` 导入；内置 OpenAI-compatible 与通用 HTTP Provider 可从 `@easy-translate/office/providers` 导入。翻译执行能力和通用类型由 `@easy-translate/core` 提供。
 
+Office 根入口同时重导出 core 的结构化错误 API，包括 `TranslationErrorCode`、`TranslationConfigurationError`、`TranslationPlanError`、`TranslationResponseError`、`TranslationProviderError` 和 `isTranslationCoreError`。内置 HTTP Provider 会把状态码、重试能力、`Retry-After`、request ID 和上游原始错误码分别保存为 `status`、`retryable`、`retryAfterMs`、`details.requestId` 和 `providerCode`；上游响应正文不会拼入标准错误消息。
+
+`ProviderResponseError` 保留现有类名、构造方式和 `instanceof OfficeTranslatorError` 兼容，同时属于 `TranslationResponseError`，因此模型 JSON 或结果结构不完整时仍可由 core 执行格式修复重试。Provider 实现不应抛出普通 `Error` 来表示可重试故障；未知异常默认不会重试。
+
 ## CLI
 
 ```sh

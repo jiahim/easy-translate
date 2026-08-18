@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  TranslationErrorCode,
+  TranslationProviderError,
+} from "@easy-translate/core";
+import {
   inspectOfficeFile,
   OfficeTranslationError,
+  translateProviderBatchWithRetry,
   translateOfficeFileInBrowser,
   type TranslationBatchRequest,
   type TranslationCheckpoint,
@@ -82,6 +87,78 @@ class ContextAwareProvider implements TranslationProvider {
 }
 
 describe("browser translation progress", () => {
+  it("retries structured transient failures for direct provider calls", async () => {
+    let attempts = 0;
+    const provider: TranslationProvider = {
+      async translateBatch(request) {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new TranslationProviderError(
+            TranslationErrorCode.ProviderRateLimit,
+            "Provider is busy.",
+            { retryable: true, retryAfterMs: 0 },
+          );
+        }
+        return request.items.map((item) => ({ id: item.id, text: "连接正常" }));
+      },
+    };
+
+    const result = await translateProviderBatchWithRetry(provider, {
+      targetLanguage: "zh-CN",
+      items: [
+        {
+          id: "connection-test",
+          text: "Connection test",
+          context: {
+            format: "word",
+            part: "browser/connection-test",
+            kind: "body",
+          },
+        },
+      ],
+    });
+
+    assert.equal(attempts, 2);
+    assert.deepEqual(result, [{ id: "connection-test", text: "连接正常" }]);
+  });
+
+  it("honors retries: 0 while building the document glossary", async () => {
+    const input = await zipBuffer({
+      "[Content_Types].xml": "<Types/>",
+      "word/document.xml":
+        '<w:document xmlns:w="w"><w:body>' +
+        Array.from(
+          { length: 3 },
+          () => "<w:p><w:r><w:t>Repeated term</w:t></w:r></w:p>",
+        ).join("") +
+        "</w:body></w:document>",
+    });
+    let glossaryCalls = 0;
+    const provider: TranslationProvider = {
+      async translateBatch(request) {
+        if (request.items[0]?.id.startsWith("document-glossary:")) {
+          glossaryCalls += 1;
+          throw new TranslationProviderError(
+            TranslationErrorCode.ProviderRateLimit,
+            "Provider is busy.",
+            { retryable: true, retryAfterMs: 0 },
+          );
+        }
+        return request.items.map((item) => ({
+          id: item.id,
+          text: "重复术语",
+        }));
+      },
+    };
+
+    await translateOfficeFileInBrowser(
+      new File([Uint8Array.from(input)], "no-glossary-retries.docx"),
+      { provider, targetLanguage: "zh-CN", retries: 0 },
+    );
+
+    assert.equal(glossaryCalls, 1);
+  });
+
   it("uses style-aware Word run replacement and translates around fields", async () => {
     const input = await zipBuffer({
       "[Content_Types].xml": "<Types/>",
@@ -347,6 +424,38 @@ describe("browser translation progress", () => {
 
     assert.equal(requests.length, 2);
     assert.match(requests[1]?.instructions ?? "", /RESPONSE FORMAT RETRY/u);
+  });
+
+  it("does not retry a provider error marked as permanent", async () => {
+    const input = await zipBuffer({
+      "[Content_Types].xml": "<Types/>",
+      "word/document.xml":
+        '<w:document xmlns:w="w"><w:body><w:p><w:r>' +
+        "<w:t>Authenticate this request</w:t>" +
+        "</w:r></w:p></w:body></w:document>",
+    });
+    let calls = 0;
+    const provider: TranslationProvider = {
+      async translateBatch() {
+        calls += 1;
+        throw new TranslationProviderError(
+          TranslationErrorCode.ProviderAuthentication,
+          "provider rejected the API key",
+          { retryable: false, status: 401 },
+        );
+      },
+    };
+
+    await assert.rejects(
+      translateOfficeFileInBrowser(
+        new File([Uint8Array.from(input)], "authentication.docx"),
+        { provider, targetLanguage: "zh-CN", retries: 2 },
+      ),
+      (error: unknown) =>
+        error instanceof TranslationProviderError &&
+        error.code === TranslationErrorCode.ProviderAuthentication,
+    );
+    assert.equal(calls, 1);
   });
 
   it("honors custom browser concurrency and per-batch character limits", async () => {

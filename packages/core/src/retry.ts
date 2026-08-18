@@ -1,5 +1,6 @@
 import {
-  TranslationPlanError,
+  TranslationConfigurationError,
+  TranslationErrorCode,
   TranslationProviderError,
   TranslationResponseError,
 } from "./errors.js";
@@ -33,7 +34,17 @@ function nonNegativeInteger(
 ): number {
   const resolved = value ?? fallback;
   if (!Number.isInteger(resolved) || resolved < 0) {
-    throw new TypeError(label + " must be a non-negative integer.");
+    throw new TranslationConfigurationError(
+      TranslationErrorCode.ConfigInvalidIntegerOption,
+      label + " must be a non-negative integer.",
+      {
+        details: {
+          option: label,
+          value: resolved,
+          minimum: 0,
+        },
+      },
+    );
   }
   return resolved;
 }
@@ -47,11 +58,7 @@ function retryReason(error: unknown): TranslationRetryReason {
 
 function defaultShouldRetry(error: unknown): boolean {
   if (error instanceof TranslationProviderError) return error.retryable;
-  if (error instanceof TranslationPlanError) return false;
-  if (error instanceof DOMException && error.name === "AbortError") {
-    return false;
-  }
-  return true;
+  return error instanceof TranslationResponseError;
 }
 
 function providerRetryAfter(error: unknown): number {

@@ -101,6 +101,8 @@ export interface TranslationCheckpoint {
 
 export interface TranslationQualityIssue {
   message: string;
+  issueCode?: string;
+  details?: Readonly<Record<string, unknown>>;
   retryInstruction?: string;
 }
 

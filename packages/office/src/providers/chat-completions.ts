@@ -8,8 +8,10 @@ import type {
 import { resolveHeaders } from "./environment.js";
 import {
   providerHttpError,
+  providerEndpoint,
   providerRequestError,
   providerRequestSignal,
+  providerResponseText,
 } from "./http.js";
 
 function responseContent(payload: unknown): string {
@@ -94,10 +96,12 @@ export class ChatCompletionsProvider implements TranslationProvider {
     request: TranslationBatchRequest,
     signal?: AbortSignal,
   ): Promise<TranslationOutputItem[]> {
-    const endpoint =
+    const endpoint = providerEndpoint(
       this.config.baseUrl.replace(/\/+$/u, "") +
-      "/" +
-      (this.config.path ?? "chat/completions").replace(/^\/+/u, "");
+        "/" +
+        (this.config.path ?? "chat/completions").replace(/^\/+/u, ""),
+      "baseUrl",
+    );
     const headers: Record<string, string> = {
       "content-type": "application/json",
       ...resolveHeaders(this.config.headers),
@@ -141,33 +145,38 @@ export class ChatCompletionsProvider implements TranslationProvider {
       ],
     };
 
+    const requestSignal = providerRequestSignal(
+      signal,
+      this.config.timeoutMs ?? 90_000,
+    );
     let response: Response;
     try {
       response = await fetch(endpoint, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-        signal: providerRequestSignal(
-          signal,
-          this.config.timeoutMs ?? 90_000,
-        ),
+        signal: requestSignal,
       });
     } catch (error) {
       throw providerRequestError(
         "Chat-completions provider request failed.",
         error,
         signal,
+        requestSignal,
       );
     }
 
-    const raw = await response.text();
+    const raw = await providerResponseText(
+      response,
+      "Unable to read the chat-completions provider response.",
+      signal,
+      requestSignal,
+    );
     if (!response.ok) {
       throw providerHttpError(
         response,
-        "Chat-completions provider returned " +
-          response.status +
-          ": " +
-          raw.slice(0, 500),
+        "Chat-completions provider returned HTTP " + response.status + ".",
+        raw,
       );
     }
 

@@ -3,7 +3,11 @@ import { describe, it } from "node:test";
 import {
   retryOperation,
   translatePlan,
+  TranslationConfigurationError,
+  TranslationErrorCode,
+  TranslationPlanError,
   TranslationProviderError,
+  TranslationResponseError,
   type TranslationBatchRequest,
   type TranslationCheckpoint,
   type TranslationPlan,
@@ -32,12 +36,15 @@ describe("translation core", () => {
       async () => {
         calls += 1;
         if (calls === 1) {
-          throw new TranslationProviderError("busy", {
-            kind: "rate-limit",
-            retryable: true,
-            retryAfterMs: 2_500,
-            status: 429,
-          });
+          throw new TranslationProviderError(
+            TranslationErrorCode.ProviderRateLimit,
+            "busy",
+            {
+              retryable: true,
+              retryAfterMs: 2_500,
+              status: 429,
+            },
+          );
         }
         return "ok";
       },
@@ -61,17 +68,114 @@ describe("translation core", () => {
       retryOperation(
         async () => {
           calls += 1;
-          throw new TranslationProviderError("unauthorized", {
-            kind: "authentication",
-            retryable: false,
-            status: 401,
-          });
+          throw new TranslationProviderError(
+            TranslationErrorCode.ProviderAuthentication,
+            "unauthorized",
+            {
+              retryable: false,
+              status: 401,
+            },
+          );
         },
         { maxRetries: 3 },
       ),
       /unauthorized/u,
     );
     assert.equal(calls, 1);
+  });
+
+  it("does not retry unknown errors unless the caller opts in", async () => {
+    let calls = 0;
+    await assert.rejects(
+      retryOperation(
+        async () => {
+          calls += 1;
+          throw new Error("unexpected provider bug");
+        },
+        {
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          maxRetries: 2,
+        },
+      ),
+      /unexpected provider bug/u,
+    );
+    assert.equal(calls, 1);
+
+    calls = 0;
+    await assert.rejects(
+      retryOperation(
+        async () => {
+          calls += 1;
+          throw new Error("explicitly retryable custom error");
+        },
+        {
+          baseDelayMs: 0,
+          maxDelayMs: 0,
+          maxRetries: 1,
+          shouldRetry: () => true,
+        },
+      ),
+      /explicitly retryable custom error/u,
+    );
+    assert.equal(calls, 2);
+  });
+
+  it("exposes stable error codes and structured details", async () => {
+    const provider: TranslationProvider<TestContext> = {
+      async translateBatch() {
+        return [];
+      },
+    };
+
+    await assert.rejects(
+      translatePlan(plan([]), { provider, targetLanguage: "" }),
+      (error: unknown) => {
+        assert.ok(error instanceof TranslationConfigurationError);
+        assert.equal(
+          error.code,
+          TranslationErrorCode.ConfigTargetLanguageRequired,
+        );
+        assert.equal(error.details.option, "targetLanguage");
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      translatePlan(
+        plan([
+          { id: "duplicate", text: "One", context: { role: "body" } },
+          { id: "duplicate", text: "Two", context: { role: "body" } },
+        ]),
+        { provider, targetLanguage: "zh-CN" },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof TranslationPlanError);
+        assert.equal(error.code, TranslationErrorCode.PlanDuplicateUnitId);
+        assert.equal(error.details.unitId, "duplicate");
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      translatePlan(
+        plan([
+          { id: "missing", text: "Text", context: { role: "body" } },
+        ]),
+        {
+          provider,
+          targetLanguage: "zh-CN",
+          retry: { maxRetries: 0 },
+        },
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof TranslationResponseError);
+        assert.equal(error.code, TranslationErrorCode.ResponseMissingId);
+        assert.equal(error.details.unitId, "missing");
+        assert.equal(error.reason, "response");
+        return true;
+      },
+    );
   });
 
   it("deduplicates units, respects batch boundaries and expands every id", async () => {
