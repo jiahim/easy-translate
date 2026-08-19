@@ -2,8 +2,39 @@
 
 运行于浏览器和 Node.js 的通用翻译执行核心。它接收 `TranslationPlan`，统一处理显式去重、分批、并发、Provider 输出校验、重试、质量策略、进度、取消和 checkpoint，并返回以单元 ID 为键的 `TranslationResult`。
 
+## 安装
+
+```sh
+npm install @easy-translate/core
+```
+
+## 快速开始
+
 ```ts
 import { translatePlan, type TranslationProvider } from "@easy-translate/core";
+
+const provider: TranslationProvider = {
+  async translateBatch(request) {
+    return request.items.map((item) => ({
+      id: item.id,
+      text: item.text === "Hello" ? "你好" : item.text,
+    }));
+  },
+};
+
+const result = await translatePlan(
+  {
+    schemaVersion: 1,
+    document: { id: "doc-1", format: "plain" },
+    units: [{ id: "u1", text: "Hello" }],
+  },
+  {
+    provider,
+    targetLanguage: "zh-CN",
+  },
+);
+
+console.log(result.translations.get("u1"));
 ```
 
 只有 adapter 明确提供相同 `dedupeKey` 的单元才会共用一次译文；`batchKey` 可隔离不同语境的批次。包内不包含文件系统、OOXML、ZIP 或具体 Provider 实现。

@@ -2,6 +2,12 @@
 
 用于翻译 DOCX、PPTX 和 XLSX 文件的 Node.js ESM 包，尽量保留 OOXML 结构、文本样式和工作簿布局。
 
+## 安装
+
+```sh
+npm install @easy-translate/office
+```
+
 ## TypeScript API
 
 ```ts
@@ -35,6 +41,7 @@ Office 根入口同时重导出 core 的结构化错误 API，包括 `Translatio
 ## CLI
 
 ```sh
+npm install -g @easy-translate/office
 office-translate ./input.docx --to zh-CN --config ./office-translator.config.mjs
 ```
 
