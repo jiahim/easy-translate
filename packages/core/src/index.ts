@@ -19,6 +19,15 @@ export type {
   TranslationResponseErrorOptions,
 } from "./errors.js";
 export { translatePlan } from "./engine.js";
+export { createPlan } from "./plan.js";
+export type { PlanUnitInput } from "./plan.js";
+export { toTranslationRecord, translateTexts } from "./translate-texts.js";
+export type { TranslateTextsOptions } from "./translate-texts.js";
+export {
+  parseBatchOutput,
+  RESPONSE_FORMAT_RETRY_INSTRUCTION,
+} from "./response.js";
+export { createEchoProvider, defineProvider } from "./testing.js";
 export { retryOperation } from "./retry.js";
 export type {
   RetryOperationOptions,

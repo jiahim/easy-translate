@@ -13,6 +13,7 @@ import {
   renderOfficeDocument,
 } from "./office-adapter.js";
 import { translatePlan } from "@easy-translate/core";
+import type { TranslationRetryPolicy } from "@easy-translate/core";
 import type {
   InspectOfficeResult,
   TranslateOfficeFileOptions,
@@ -20,6 +21,17 @@ import type {
   TranslateOfficeResult,
   TranslationStats,
 } from "./types.js";
+
+/** `retries` is a shorthand that wins over `retryPolicy.maxRetries`. */
+function resolveRetry(
+  options: TranslateOfficeOptions,
+): TranslationRetryPolicy | undefined {
+  if (!options.retryPolicy && options.retries === undefined) return undefined;
+  return {
+    ...options.retryPolicy,
+    maxRetries: options.retries ?? options.retryPolicy?.maxRetries,
+  };
+}
 
 export async function inspectOfficeBuffer(
   buffer: Buffer,
@@ -63,33 +75,16 @@ export async function translateOfficeBuffer(
   const translated = await translatePlan(prepared.plan, {
     provider: options.provider,
     targetLanguage: options.targetLanguage,
-    ...(options.sourceLanguage
-      ? { sourceLanguage: options.sourceLanguage }
-      : {}),
-    ...(options.instructions ? { instructions: options.instructions } : {}),
-    ...(options.batchSize === undefined ? {} : { batchSize: options.batchSize }),
-    ...(options.maxBatchCharacters === undefined
-      ? {}
-      : { maxBatchCharacters: options.maxBatchCharacters }),
-    ...(options.concurrency === undefined
-      ? {}
-      : { concurrency: options.concurrency }),
-    ...(options.retryPolicy || options.retries !== undefined
-      ? {
-          retry: {
-            ...options.retryPolicy,
-            ...(options.retries === undefined
-              ? {}
-              : { maxRetries: options.retries }),
-          },
-        }
-      : {}),
-    ...(options.signal ? { signal: options.signal } : {}),
-    ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}),
-    ...(options.qualityPolicy
-      ? { qualityPolicy: options.qualityPolicy }
-      : {}),
-    ...(options.onCheckpoint ? { onCheckpoint: options.onCheckpoint } : {}),
+    sourceLanguage: options.sourceLanguage,
+    instructions: options.instructions,
+    batchSize: options.batchSize,
+    maxBatchCharacters: options.maxBatchCharacters,
+    concurrency: options.concurrency,
+    retry: resolveRetry(options),
+    signal: options.signal,
+    checkpoint: options.checkpoint,
+    qualityPolicy: options.qualityPolicy,
+    onCheckpoint: options.onCheckpoint,
     onProgress(progress) {
       options.onProgress?.({
         completedBatches: progress.completedBatches,
@@ -127,7 +122,7 @@ export async function translateOfficeBuffer(
     partsScanned: plan.partsScanned,
     partsChanged: rendered.partsChanged,
     segmentsFound: segments.length,
-    uniqueSegmentsTranslated: translated.stats.translatedUnits,
+    uniqueSegmentsTranslated: translated.stats.uniqueUnits,
     charactersTranslated: translated.stats.characters,
     skippedFieldParagraphs: plan.skippedFieldParagraphs,
     outputBytes: rendered.buffer.length,

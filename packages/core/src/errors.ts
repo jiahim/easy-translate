@@ -1,3 +1,7 @@
+/**
+ * Stable, locale-free error codes. Select from this object instead of writing
+ * protocol strings such as `"provider.timeout"` by hand.
+ */
 export const TranslationErrorCode = {
   ConfigTargetLanguageRequired: "config.target_language_required",
   ConfigInvalidIntegerOption: "config.invalid_integer_option",
@@ -45,9 +49,11 @@ export type TranslationProviderErrorCode = Extract<
 export type TranslationErrorDetails = Readonly<Record<string, unknown>>;
 
 export interface TranslationCoreErrorOptions extends ErrorOptions {
-  details?: TranslationErrorDetails;
+  /** Structured, locale-free context for logs and UI messages. */
+  details?: TranslationErrorDetails | undefined;
 }
 
+/** Base class for every error raised by this package. */
 export abstract class TranslationCoreError<
   TCode extends TranslationErrorCode = TranslationErrorCode,
 > extends Error {
@@ -66,12 +72,14 @@ export abstract class TranslationCoreError<
   }
 }
 
+/** Narrows an unknown error to the package's error hierarchy. */
 export function isTranslationCoreError(
   error: unknown,
 ): error is TranslationCoreError<TranslationErrorCode> {
   return error instanceof TranslationCoreError;
 }
 
+/** Invalid engine options. Never retried. */
 export class TranslationConfigurationError extends TranslationCoreError<
   TranslationConfigurationErrorCode
 > {
@@ -85,6 +93,7 @@ export class TranslationConfigurationError extends TranslationCoreError<
   }
 }
 
+/** Malformed `TranslationPlan`. Never retried. */
 export class TranslationPlanError extends TranslationCoreError<
   TranslationPlanErrorCode
 > {
@@ -100,8 +109,14 @@ export class TranslationPlanError extends TranslationCoreError<
 
 export interface TranslationResponseErrorOptions
   extends TranslationCoreErrorOptions {
-  retryInstruction?: string;
+  /** Appended to the next attempt's instructions so the provider can correct itself. */
+  retryInstruction?: string | undefined;
 }
+
+/**
+ * The provider replied, but the response was malformed or rejected by the
+ * quality policy. Retried by default.
+ */
 
 export class TranslationResponseError extends TranslationCoreError<
   TranslationResponseErrorCode
@@ -126,6 +141,11 @@ export class TranslationResponseError extends TranslationCoreError<
   }
 }
 
+/**
+ * Kebab-case counterpart of the `provider.*` codes, derived automatically.
+ * `provider.rate_limit` maps to `"rate-limit"`, `provider.invalid_request` to
+ * `"invalid-request"`, and so on. Branch on `error.code` for stable checks.
+ */
 export type TranslationProviderErrorKind =
   | "authentication"
   | "invalid-request"
@@ -150,12 +170,16 @@ const PROVIDER_KIND_BY_CODE = {
 
 export interface TranslationProviderErrorOptions
   extends TranslationCoreErrorOptions {
-  providerCode?: string;
-  retryAfterMs?: number;
-  retryable?: boolean;
-  status?: number;
+  /** Raw upstream code. Never use it for cross-provider control flow. */
+  providerCode?: string | undefined;
+  /** Honored as a lower bound for the next backoff delay. */
+  retryAfterMs?: number | undefined;
+  /** Must be `true` for the default retry policy to retry. @defaultValue false */
+  retryable?: boolean | undefined;
+  status?: number | undefined;
 }
 
+/** Raised by provider implementations for transport and upstream failures. */
 export class TranslationProviderError extends TranslationCoreError<
   TranslationProviderErrorCode
 > {

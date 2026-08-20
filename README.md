@@ -11,18 +11,19 @@ pnpm install
 pnpm office-web
 ```
 
-`pnpm office-web` 会先构建 `@easy-translate/core`，再启动 Office Web 的本地开发服务。
+`pnpm office-web` 会先构建 `@easy-translate/core` 和 `@easy-translate/office`，再启动 Office Web 的本地开发服务。
 
 如果要直接使用公共包：
 
 ```sh
-npm install @easy-translate/core @easy-translate/office
+npm install @easy-translate/core @easy-translate/providers @easy-translate/office
 ```
 
 ## Workspace
 
 - `@easy-translate/core`：浏览器与 Node.js 通用的翻译执行核心，运行时零第三方依赖。
-- `@easy-translate/office`：DOCX、PPTX、XLSX 的 OOXML adapter、Provider 与 Node.js CLI。
+- `@easy-translate/providers`：OpenAI 兼容 Provider 工厂与 `createCustomProvider`。完整清单见 [`packages/providers/README.md`](./packages/providers/README.md)。
+- `@easy-translate/office`：DOCX、PPTX、XLSX 的 OOXML adapter 与 Node.js CLI。
 - `apps/office-web`：私有浏览器应用，不发布到 npm。
 
 ```text
@@ -33,6 +34,7 @@ npm install @easy-translate/core @easy-translate/office
 更详细的包说明见：
 
 - [`@easy-translate/core`](./packages/core/README.md)
+- [`@easy-translate/providers`](./packages/providers/README.md)
 - [`@easy-translate/office`](./packages/office/README.md)
 - [`Office Web`](./apps/office-web/README.md)
 
@@ -46,6 +48,11 @@ pnpm pack:check
 
 ## 示例
 
-[`examples/`](./examples) 目录包含 Chat Completions、通用 HTTP 和自定义 Provider 的配置示例。
+[`examples/`](./examples) 目录包含一个可直接运行的 core 快速开始脚本，以及 Chat Completions、通用 HTTP 和自定义 Provider 的配置示例。
+
+```sh
+pnpm --filter @easy-translate/core build
+node examples/core-quickstart.mjs
+```
 
 公共包采用 ESM-only，并通过 package exports 暴露正式入口。

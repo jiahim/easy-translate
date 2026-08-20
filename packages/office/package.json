@@ -59,6 +59,7 @@
   },
   "dependencies": {
     "@easy-translate/core": "workspace:^",
+    "@easy-translate/providers": "workspace:^",
     "commander": "^14.0.0",
     "jszip": "^3.10.1"
   }

@@ -4,6 +4,7 @@ import {
   TranslationPlanError,
   TranslationResponseError,
 } from "./errors.js";
+import { parseBatchOutput } from "./response.js";
 import { retryOperation } from "./retry.js";
 import type {
   TranslationBatchRequest,
@@ -16,6 +17,7 @@ import type {
   TranslationProgress,
   TranslationProviderActivity,
   TranslationResult,
+  TranslationRetryPolicy,
   TranslationUnit,
 } from "./types.js";
 
@@ -28,9 +30,6 @@ interface TranslationBatch<TContext> {
   items: UniqueUnit<TContext>[];
   characters: number;
 }
-
-const RESPONSE_FORMAT_RETRY_INSTRUCTION =
-  "RESPONSE FORMAT RETRY: Return every requested id exactly once with a non-empty translated text. Do not add commentary or omit items.";
 
 function positiveInteger(
   value: number | undefined,
@@ -177,75 +176,17 @@ async function validateOutput<TContext>(
   plan: TranslationPlan<TContext>,
   options: TranslationEngineOptions<TContext>,
 ): Promise<Map<string, string>> {
-  if (!Array.isArray(output)) {
-    throw new TranslationResponseError(
-      TranslationErrorCode.ResponseInvalidContainer,
-      "The provider must return an array of { id, text } objects.",
-      { retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION },
-    );
-  }
-  const expectedIds = new Set(batch.items.map(({ item }) => item.id));
-  const result = new Map<string, string>();
-  for (const [outputIndex, item] of output.entries()) {
-    if (
-      typeof item !== "object" ||
-      item === null ||
-      typeof item.id !== "string" ||
-      typeof item.text !== "string"
-    ) {
-      throw new TranslationResponseError(
-        TranslationErrorCode.ResponseInvalidItem,
-        "The provider returned an invalid translation item.",
-        {
-          details: { outputIndex },
-          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
-        },
-      );
-    }
-    if (!expectedIds.has(item.id)) {
-      throw new TranslationResponseError(
-        TranslationErrorCode.ResponseUnexpectedId,
-        "The provider returned an unexpected translation id: " + item.id,
-        {
-          details: { unitId: item.id },
-          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
-        },
-      );
-    }
-    if (result.has(item.id)) {
-      throw new TranslationResponseError(
-        TranslationErrorCode.ResponseDuplicateId,
-        "The provider returned a duplicate translation id: " + item.id,
-        {
-          details: { unitId: item.id },
-          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
-        },
-      );
-    }
-    result.set(item.id, item.text);
-  }
+  const result = parseBatchOutput(request, output);
+  if (!options.qualityPolicy) return result;
 
   for (const entry of batch.items) {
-    const translatedText = result.get(entry.item.id);
-    if (
-      translatedText === undefined ||
-      (!translatedText.trim() && entry.item.text.trim())
-    ) {
-      throw new TranslationResponseError(
-        TranslationErrorCode.ResponseMissingId,
-        "The provider omitted translation id: " + entry.item.id,
-        {
-          details: { unitId: entry.item.id },
-          retryInstruction: RESPONSE_FORMAT_RETRY_INSTRUCTION,
-        },
-      );
-    }
+    const translatedText = result.get(entry.item.id)!;
     const qualityItem: TranslationInputItem<TContext> = {
       id: entry.item.id,
       text: entry.item.text,
       context: entry.item.context,
     };
-    const issue = await options.qualityPolicy?.({
+    const issue = await options.qualityPolicy({
       item: qualityItem,
       plan,
       request,
@@ -311,6 +252,18 @@ function abortError(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Translation was aborted.", "AbortError");
 }
 
+/**
+ * Executes a translation plan: deduplicates units, splits them into batches,
+ * runs batches concurrently through the provider, validates every response,
+ * retries recoverable failures and emits progress and checkpoints.
+ *
+ * For plain strings, prefer `translateTexts`, which builds the plan for you.
+ *
+ * @throws {TranslationConfigurationError} Invalid options.
+ * @throws {TranslationPlanError} Malformed plan.
+ * @throws {TranslationResponseError} The provider kept returning invalid or
+ * rejected output after all retries.
+ */
 export async function translatePlan<TContext>(
   plan: TranslationPlan<TContext>,
   options: TranslationEngineOptions<TContext>,
@@ -330,6 +283,10 @@ export async function translatePlan<TContext>(
     "maxBatchCharacters",
   );
   const concurrency = positiveInteger(options.concurrency, 2, "concurrency");
+  const retryPolicy: TranslationRetryPolicy =
+    typeof options.retry === "number"
+      ? { maxRetries: options.retry }
+      : (options.retry ?? {});
   const unique = uniqueUnits(plan.units);
   const batches = makeBatches(unique, batchSize, maxBatchCharacters);
   const translations = new Map<string, string>();
@@ -352,6 +309,7 @@ export async function translatePlan<TContext>(
       }
     }
   }
+  const fromCheckpointUnits = completedItems.size;
 
   const pendingBatches = batches.flatMap((batch, index) => {
     const items = batch.items.filter(
@@ -457,7 +415,7 @@ export async function translatePlan<TContext>(
             }
           },
           {
-            ...options.retry,
+            ...retryPolicy,
             signal: controller.signal,
             onRetry(event) {
               lastRetry = event;
@@ -512,6 +470,9 @@ export async function translatePlan<TContext>(
       batches: batches.length,
       characters: unique.reduce((sum, entry) => sum + entry.item.text.length, 0),
       translatedUnits: unique.length,
+      uniqueUnits: unique.length,
+      freshlyTranslatedUnits: completedItems.size - fromCheckpointUnits,
+      fromCheckpointUnits,
     },
   };
 }

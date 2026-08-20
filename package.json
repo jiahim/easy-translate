@@ -4,14 +4,14 @@
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "preoffice-web": "pnpm --filter @easy-translate/core build",
+    "preoffice-web": "pnpm --filter @easy-translate/core --filter @easy-translate/office build",
     "office-web": "pnpm --filter @easy-translate/office-web dev",
     "build": "pnpm -r --if-present build",
-    "typecheck": "pnpm --filter @easy-translate/core build && pnpm -r --if-present typecheck",
-    "test": "pnpm --filter @easy-translate/core build && pnpm -r --if-present test",
+    "typecheck": "pnpm --filter @easy-translate/core --filter @easy-translate/providers build && pnpm -r --if-present typecheck",
+    "test": "pnpm --filter @easy-translate/core --filter @easy-translate/providers build && pnpm -r --if-present test",
     "lint": "pnpm -r --if-present lint",
     "check": "pnpm typecheck && pnpm test && pnpm build",
-    "pack:check": "pnpm --filter @easy-translate/core pack --dry-run && pnpm --filter @easy-translate/office pack --dry-run",
+    "pack:check": "pnpm --filter @easy-translate/core pack --dry-run && pnpm --filter @easy-translate/providers pack --dry-run && pnpm --filter @easy-translate/office pack --dry-run",
     "changeset": "changeset",
     "version-packages": "changeset version"
   },

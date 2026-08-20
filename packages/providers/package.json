@@ -1,0 +1,53 @@
+{
+  "name": "@easy-translate/providers",
+  "version": "0.0.0",
+  "description": "Ready-made translation providers for @easy-translate/core.",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx tests/run.ts"
+  },
+  "keywords": [
+    "translation",
+    "openai",
+    "deepseek",
+    "kimi",
+    "minimax",
+    "zhipu",
+    "siliconflow"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiahim/easy-translate.git",
+    "directory": "packages/providers"
+  },
+  "homepage": "https://github.com/jiahim/easy-translate/tree/main/packages/providers",
+  "bugs": {
+    "url": "https://github.com/jiahim/easy-translate/issues"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@easy-translate/core": "workspace:^"
+  }
+}

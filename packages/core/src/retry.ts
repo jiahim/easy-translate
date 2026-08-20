@@ -16,9 +16,12 @@ export interface RetryRuntime {
 }
 
 export interface RetryOperationOptions extends TranslationRetryPolicy {
-  runtime?: Partial<RetryRuntime>;
-  signal?: AbortSignal;
-  onRetry?: (event: TranslationRetryEvent) => Promise<void> | void;
+  /** Injectable clock and randomness, for deterministic tests. */
+  runtime?: Partial<RetryRuntime> | undefined;
+  signal?: AbortSignal | undefined;
+  onRetry?:
+    | ((event: TranslationRetryEvent) => Promise<void> | void)
+    | undefined;
 }
 
 const DEFAULT_RUNTIME: RetryRuntime = {
@@ -106,6 +109,13 @@ async function waitForDelay(
   });
 }
 
+/**
+ * Runs an operation with exponential backoff and jitter, honoring
+ * `retryAfterMs` from `TranslationProviderError` as a minimum delay.
+ *
+ * By default only `TranslationResponseError` and retryable
+ * `TranslationProviderError` are retried; pass `shouldRetry` to widen that.
+ */
 export async function retryOperation<T>(
   operation: (attempt: number) => Promise<T>,
   options: RetryOperationOptions = {},
@@ -122,7 +132,10 @@ export async function retryOperation<T>(
     "maxDelayMs",
   );
   const jitterMs = nonNegativeInteger(options.jitterMs, 0, "jitterMs");
-  const runtime: RetryRuntime = { ...DEFAULT_RUNTIME, ...options.runtime };
+  const runtime: RetryRuntime = {
+    random: options.runtime?.random ?? DEFAULT_RUNTIME.random,
+    sleep: options.runtime?.sleep ?? DEFAULT_RUNTIME.sleep,
+  };
   const shouldRetry = options.shouldRetry ?? defaultShouldRetry;
 
   for (let attempt = 0; ; attempt += 1) {

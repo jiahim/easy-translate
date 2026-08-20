@@ -98,12 +98,21 @@ importers:
       '@easy-translate/core':
         specifier: workspace:^
         version: link:../core
+      '@easy-translate/providers':
+        specifier: workspace:^
+        version: link:../providers
       commander:
         specifier: ^14.0.0
         version: 14.0.3
       jszip:
         specifier: ^3.10.1
         version: 3.10.1
+
+  packages/providers:
+    dependencies:
+      '@easy-translate/core':
+        specifier: workspace:^
+        version: link:../core
 
 packages:
 
