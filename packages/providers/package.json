@@ -1,6 +1,6 @@
 {
   "name": "@easy-translate/providers",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Ready-made translation providers for @easy-translate/core.",
   "type": "module",
   "sideEffects": false,
