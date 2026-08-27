@@ -88,6 +88,7 @@ test("removes starter-only assets and metadata", async () => {
     translator,
     /providerMode === "trial" \? TRIAL_MAX_CONCURRENCY : ownKeyConcurrency/,
   );
+  assert.match(translator, /const MAX_OWN_KEY_CONCURRENCY = 100/);
   assert.match(translator, /最多 \{TRIAL_MAX_CONCURRENCY\} 个请求并发/);
   assert.doesNotMatch(page + layout, /codex-preview|_sites-preview/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
